@@ -1,0 +1,156 @@
+---
+title: "week11"
+author: "Jiayin Qu"
+date: "4/1/2020"
+output: pdf_document
+---
+# Library Imports
+```{r setup, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(stringr)
+library(haven)
+library(glmnet)
+library(caret)
+library(tictoc)
+library(mice)
+library(MLmetrics)
+library(xgboost)
+library(lattice)
+```
+
+
+# Data Import
+- import dataset
+- use zap_empty to clean up blank cells (show them as NAs)
+- isolate personality and health variables 
+- get rid of labels from labelled vectors
+- turn variables into numeric 
+- combine personality and health data for the final dataset
+- delete obs that does not have DV
+```{r}
+gss <- read_sav("../data/GSS2006.sav") %>%
+  mutate_all(zap_label) %>%
+  mutate_all(zap_labels) %>%
+  mutate_all(zap_formats) %>%
+  mutate_all(zap_widths) %>%
+  as_tibble(lapply(., as.character))
+gss_per <- gss %>% 
+  select(starts_with("BIG5")) %>%
+  as_tibble(lapply(., as.numeric))
+gss_health <- gss %>%
+  select(ends_with("HEALTH")) %>%
+  lapply(., as.numeric)
+final_gss <- cbind(gss_per, gss_health)
+final_gss <- final_gss[!is.na(final_gss$HEALTH),]
+```
+
+#Analysis
+- run OLS model 
+```{r, results = "hide", warning = FALSE, message = FALSE}
+lm_model <- train(
+  HEALTH ~ .^2,
+  final_gss, 
+  method = "lm", 
+  preProcess = c("center", "scale", "zv", "medianImpute"), 
+  trControl=trainControl(method = "cv", number = 10, verboseIter = T),
+  na.action = na.pass
+)
+```
+
+```{r}
+summary(lm_model)
+```
+
+- dummy code DV and create folds
+```{r}
+# turn Health into factor
+final_per <- final_gss[,1:10]
+final_health <- factor(final_gss$HEALTH, levels = c(1, 2, 3, 4), labels = c("Excellent", "Good", "Fair", "Poor"))
+final_gss <- cbind(final_per, final_health)
+
+# set 10 folds
+gssControl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  summaryFunction = multiClassSummary, 
+  classProbs = TRUE, 
+  verboseIter = TRUE,
+  savePredictions = TRUE
+)
+```
+
+- run 10-fold elastic net regression
+```{r, results = "hide", warning = FALSE, message = FALSE}
+model_glmnet <- train(
+  x = final_per, 
+  y = final_health, 
+  metric = "ROC", 
+  method = "glmnet", 
+  trControl = gssControl,
+  tuneGrid = expand.grid(
+    alpha = 0:1, 
+    lambda = seq(0.0001, 1, length = 10)), 
+  preProcess = c("medianImpute","zv","center", "scale", "pca"), 
+  na.action = na.pass,
+  tuneLength = 10
+)
+```
+
+```{r}
+model_glmnet
+plot(model_glmnet)
+```
+The tuning parameters worked best for the elastic net model were alpha = 0 and lambda = 0.1112. Alpha = 0, meaning that the "best" model is a full ridge model. 
+
+- run SVM model
+```{r, results = "hide", warning = FALSE, message = FALSE}
+model_SVM <- train(
+  x = final_per, 
+  y = final_health, 
+  metric = "ROC", 
+  method = "svmLinear", 
+  trControl = gssControl,
+  preProcess = c("medianImpute", "zv","center", "scale", "pca")
+)
+```
+
+```{r}
+model_SVM
+```
+
+- run Extreme Gradient Boosted model
+```{r, results = "hide", warning = FALSE, message = FALSE}
+model_xgb <- train(
+  x = final_per, 
+  y = final_health, 
+  metric = "ROC", 
+  method = "xgbTree", 
+  trControl = gssControl,
+  preProcess = c("medianImpute", "zv","center", "scale", "pca")
+)
+```
+
+```{r}
+model_xgb
+```
+
+- compare models
+```{r}
+model_list <- list(model_glmnet = model_glmnet, model_SVM = model_SVM, model_xgb = model_xgb)
+resamples <- resamples(model_list)
+bwplot(resamples, metric = "Accuracy")
+bwplot(resamples, metric = "AUC")
+bwplot(resamples, metric = "logLoss")
+```
+
+It appears that none of the model will be able to predict as AUCs are around 0.5 and logloss is large as well. Therefore, although model glmnet seems to perform the best based on log lost and accuracy among the three models, the difference is small and none of the model seems to significantly outperform the others. 
+
+I would prefer to choose OLS model. Because: 
+- although OLS model does not seem to explain much of the variance (adjusted R^2 = 2%), none of the three machine learning model (glmnet, SVM, xgb) seems to predict HEALTH based on personality variables better than chance (AUC ~ 0.5 and logLoss > 1). 
+- in this case, N is orders of magnitude larger than k (3000+ observations with 10 predictors), therefore, machine learning shouldn't get much better prediction. 
+```{r include = FALSE}
+
+```
+
